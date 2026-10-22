@@ -65,6 +65,23 @@
   --reader-text: #c9d1d9;
 }
 
+[data-theme="sepia"] {
+  /* 米黄 · 泛黄纸张 */
+  --bg: #f5ecd7;
+  --surface: #efe4c9;
+  --surface-2: #f9f2e0;
+  --text: #4f3f2a;
+  --text-secondary: #7a6a52;
+  --border: #d9c9a3;
+  --primary: #a87b2f;
+  --primary-hover: #8f6623;
+  --shadow: 0 2px 8px rgba(79,63,42,0.10);
+  --card-shadow: 0 4px 16px rgba(79,63,42,0.12);
+  --header-bg: #f5ecd7;
+  --reader-bg: #f5ecd7;
+  --reader-text: #4f3f2a;
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
@@ -261,6 +278,7 @@ body { padding-top: 50px; }
 .theme-btn[data-theme="dark"] { background: #1a1a1a; border-color: #3a3a3a; }
 .theme-btn[data-theme="eye-care"] { background: #c7edcc; border-color: #b0d4b8; }
 .theme-btn[data-theme="night"] { background: #0d1117; border-color: #30363d; }
+.theme-btn[data-theme="sepia"] { background: #f5ecd7; border-color: #d9c9a3; }
 .theme-btn.active { border-color: var(--primary); border-width: 3px; }
 
 /* 滑块 */
