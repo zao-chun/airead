@@ -401,6 +401,69 @@ mark { background: #ffe066; color: #1a1a1a; padding: 0 2px; border-radius: 2px; 
   height: 100%; background: var(--primary); transition: width 0.2s;
 }
 
+/* ========== 翻页模式（左右翻页 / 仿真翻页） ========== */
+.reader-container.mode-paging {
+  overflow-y: hidden; overflow-x: auto;
+  scroll-snap-type: x mandatory;
+}
+.reader-container.mode-paging #book-content {
+  display: flex; flex-direction: row;
+  max-width: none; height: 100%; padding: 0 !important;
+}
+.reader-container.mode-paging #book-content .page {
+  flex: 0 0 100%; height: 100%;
+  overflow-y: hidden; scroll-snap-align: start;
+}
+.reader-container.mode-flip { overflow: hidden; }
+.reader-container.mode-flip #book-content {
+  position: relative; max-width: none; height: 100%; padding: 0 !important;
+}
+.reader-container.mode-flip #book-content .page {
+  position: absolute; inset: 0;
+  overflow: hidden; visibility: hidden;
+  backface-visibility: hidden;
+  background: var(--reader-bg);
+}
+.reader-container.mode-flip #book-content .page.current { visibility: visible; z-index: 2; }
+.reader-container.mode-flip #book-content .page.under { visibility: visible; z-index: 1; }
+
+/* 仿真翻页动画 */
+@keyframes flipOutLeft {
+  from { transform: perspective(1800px) rotateY(0deg); opacity: 1; }
+  to   { transform: perspective(1800px) rotateY(-95deg); opacity: 0.15;
+         box-shadow: -40px 0 60px rgba(0,0,0,0.3); }
+}
+@keyframes flipOutRight {
+  from { transform: perspective(1800px) rotateY(0deg); opacity: 1; }
+  to   { transform: perspective(1800px) rotateY(95deg); opacity: 0.15;
+         box-shadow: 40px 0 60px rgba(0,0,0,0.3); }
+}
+@keyframes flipInLeft {
+  from { transform: perspective(1800px) rotateY(-25deg); opacity: 0.4; }
+  to   { transform: perspective(1800px) rotateY(0deg); opacity: 1; }
+}
+@keyframes flipInRight {
+  from { transform: perspective(1800px) rotateY(25deg); opacity: 0.4; }
+  to   { transform: perspective(1800px) rotateY(0deg); opacity: 1; }
+}
+.page.flip-out-left  { transform-origin: left center;  animation: flipOutLeft  0.45s ease forwards; }
+.page.flip-out-right { transform-origin: right center; animation: flipOutRight 0.45s ease forwards; }
+.page.flip-in-left   { transform-origin: left center;  animation: flipInLeft   0.45s ease; }
+.page.flip-in-right  { transform-origin: right center; animation: flipInRight  0.45s ease; }
+
+/* 页码指示器 */
+.page-indicator {
+  position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+  background: var(--surface-2); border: 1px solid var(--border);
+  padding: 4px 14px; border-radius: 14px;
+  font-size: 12px; color: var(--text-secondary);
+  z-index: 95; box-shadow: var(--shadow);
+}
+/* 左右点击翻页热区 */
+.tap-zone { position: fixed; top: 50px; bottom: 0; width: 25%; z-index: 94; }
+.tap-zone.left { left: 0; }
+.tap-zone.right { right: 0; }
+
 /* 滚动条美化 */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
