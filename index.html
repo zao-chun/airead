@@ -38,7 +38,7 @@
 <script src="js/app.js"></script>
 <script>
 $('#theme-toggle').addEventListener('click', () => {
-  const themes = ['light', 'dark', 'eye-care', 'night'];
+  const themes = ['light', 'dark', 'eye-care', 'sepia', 'night'];
   const current = document.documentElement.getAttribute('data-theme') || 'light';
   const next = themes[(themes.indexOf(current) + 1) % themes.length];
   Settings.set('theme', next);
