@@ -21,6 +21,7 @@ const App = {
     lineHeight: 1.8,
     textIndent: 2,
     pageMargins: 24,
+    pageMode: 'scroll', // scroll=上下滚动 | paging=左右翻页 | flip=仿真翻页
   },
   db: null,
 };
@@ -157,7 +158,7 @@ function downloadBlob(blob, filename) {
 // ============ 设置（主题/字体/行距）============
 const Settings = {
   async load() {
-    const keys = ['theme', 'fontSize', 'lineHeight', 'textIndent', 'pageMargins'];
+    const keys = ['theme', 'fontSize', 'lineHeight', 'textIndent', 'pageMargins', 'pageMode'];
     const saved = await Promise.all(
       keys.map(k => Storage.get(Storage.STORE_SETTINGS, k))
     );
@@ -183,6 +184,8 @@ const Settings = {
     if (lineHeightInput) lineHeightInput.value = App.settings.lineHeight;
     const themeBtns = $$('.theme-btn');
     themeBtns.forEach(btn => btn.classList.toggle('active', btn.dataset.theme === App.settings.theme));
+    // 分页模式下字体/行距/边距变化后需要重新分页
+    if (window.Pager && Pager.active) Pager.repaginate();
   },
 
   async set(key, value) {
@@ -336,22 +339,29 @@ const Reader = {
 
   async saveProgress() {
     const book = App.state.currentBook;
+    if (!book) return;
     const scrollTop = $('.reader-container')?.scrollTop || 0;
     const scrollHeight = $('.reader-container')?.scrollHeight || 1;
-    const progress = scrollTop / (scrollHeight - window.innerHeight);
-    const finalProgress = Math.max(0, Math.min(1, progress));
+    let progress = scrollTop / (scrollHeight - window.innerHeight);
+    if (Pager.active) {
+      progress = Pager.pages.length > 1 ? Pager.index / (Pager.pages.length - 1) : 1;
+    }
+    const finalProgress = Math.max(0, Math.min(1, progress || 0));
     book.progress = finalProgress;
     await Storage.put(Storage.STORE_BOOKS, book);
     await Storage.put(Storage.STORE_PROGRESS, {
       bookId: book.id,
       chapter: App.state.currentChapter,
       pdfPage: App.state.pdfPage,
+      pageIndex: Pager.active ? Pager.index : 0,
+      pageMode: App.settings.pageMode,
       scrollTop,
     });
   },
 
   bindEvents() {
     $('.reader-container')?.addEventListener('scroll', () => {
+      if (Pager.active) return; // 分页模式下进度由 Pager 管理
       const sc = $('.reader-container');
       if (!sc) return;
       const total = sc.scrollHeight - sc.clientHeight;
@@ -396,11 +406,17 @@ const Reader = {
         return `<p>${line.replace(/ {2,}/g, '&nbsp;&nbsp;')}</p>`;
       }).join('');
     }
+    Pager.reset();
     $('#book-content').innerHTML = html;
 
-    // 恢复阅读位置
     const prog = await Storage.get(Storage.STORE_PROGRESS, book.id);
-    if (prog && prog.scrollTop) {
+    App.state._savedPageIndex = prog?.pageIndex || 0;
+
+    if (App.settings.pageMode && App.settings.pageMode !== 'scroll') {
+      // 分页模式：等待渲染完成后分页并恢复页码
+      setTimeout(() => Pager.init(App.settings.pageMode), 50);
+    } else if (prog && prog.scrollTop) {
+      // 滚动模式：恢复滚动位置
       setTimeout(() => {
         $('.reader-container').scrollTop = prog.scrollTop;
       }, 100);
@@ -558,13 +574,15 @@ const Reader = {
       if (headings.length === 0) {
         // 没有标题，尝试按段落生成简易目录
         const paragraphs = $$('p', content).filter(p => p.textContent.trim().length > 0);
-        App.state.toc = paragraphs.slice(0, Math.min(20, paragraphs.length)).map((p, i) => ({
-          id: `para-${i}`, title: (p.textContent.slice(0, 30) || '段落 ' + (i + 1)), level: 1,
-        }));
+        App.state.toc = paragraphs.slice(0, Math.min(20, paragraphs.length)).map((p, i) => {
+          p.id = `para-${i}`;
+          return { id: `para-${i}`, title: (p.textContent.slice(0, 30) || '段落 ' + (i + 1)), level: 1, el: p };
+        });
       } else {
-        App.state.toc = headings.map((h, i) => ({
-          id: `heading-${i}`, title: h.textContent.trim(), level: parseInt(h.tagName[1]), el: h,
-        }));
+        App.state.toc = headings.map((h, i) => {
+          h.id = `heading-${i}`;
+          return { id: `heading-${i}`, title: h.textContent.trim(), level: parseInt(h.tagName[1]), el: h };
+        });
       }
     }
   },
@@ -582,8 +600,13 @@ const Reader = {
       const page = parseInt(id.replace('page-', ''));
       this._gotoPdfPage(page);
     } else {
-      const el = document.getElementById(id);
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const tocItem = App.state.toc.find(t => t.id === id);
+      const el = tocItem?.el || document.getElementById(id);
+      if (Pager.active && el) {
+        Pager.gotoNode(el);
+      } else if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
     }
     Panel.close();
   },
@@ -669,11 +692,14 @@ const Bookmarks = {
     const bm = {
       id: uid(),
       bookId: book.id,
-      position: App.state.readerFormat === 'pdf'
-        ? `第 ${App.state.pdfPage} 页`
-        : `位置 ${Math.round((sc.scrollTop / (sc.scrollHeight - sc.clientHeight)) * 100)}%`,
+      position: Pager.active
+        ? `第 ${Pager.index + 1} 页`
+        : App.state.readerFormat === 'pdf'
+          ? `第 ${App.state.pdfPage} 页`
+          : `位置 ${Math.round((sc.scrollTop / (sc.scrollHeight - sc.clientHeight)) * 100)}%`,
       scrollTop: sc.scrollTop,
       pdfPage: App.state.pdfPage,
+      pageIndex: Pager.active ? Pager.index : null,
       createdAt: Date.now(),
     };
     await Storage.put(Storage.STORE_BOOKMARKS, bm);
@@ -714,7 +740,9 @@ const Bookmarks = {
     const bm = (await this.list()).find(b => b.id === id);
     if (!bm) return;
     const sc = $('.reader-container');
-    if (App.state.readerFormat === 'pdf') {
+    if (Pager.active && bm.pageIndex != null) {
+      Pager.gotoPage(bm.pageIndex);
+    } else if (App.state.readerFormat === 'pdf') {
       Reader._gotoPdfPage(bm.pdfPage);
     } else if (sc && bm.scrollTop) {
       sc.scrollTo({ top: bm.scrollTop, behavior: 'smooth' });
@@ -904,6 +932,14 @@ const Panel = {
               <button class="btn" data-indent="2" style="background:var(--primary);color:#fff">两字符</button>
               <button class="btn" data-indent="4">四字符</button>
             </div>
+          </div>
+          <div class="panel-section">
+            <h4>翻页方式</h4>
+            <div class="btn-group">
+              <button class="btn" data-pagemode="scroll">上下滚动</button>
+              <button class="btn" data-pagemode="paging">左右翻页</button>
+              <button class="btn" data-pagemode="flip">仿真翻页</button>
+            </div>
           </div>`;
       },
     };
@@ -963,7 +999,11 @@ const Panel = {
             item.onclick = () => {
               const idx = parseInt(item.dataset.idx);
               const r = results[idx];
-              r.parent?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              if (Pager.active && r.parent) {
+                Pager.gotoNode(r.parent);
+              } else {
+                r.parent?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
               Panel.close();
             };
           });
@@ -997,9 +1037,246 @@ const Panel = {
           Settings.set('textIndent', parseInt(btn.dataset.indent));
         });
       });
+      // 翻页方式按钮：标记当前模式并即时切换
+      const pmBtns = $$('.btn[data-pagemode]');
+      pmBtns.forEach(b => b.classList.toggle('active', b.dataset.pagemode === App.settings.pageMode));
+      pmBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+          pmBtns.forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          Settings.set('pageMode', btn.dataset.pagemode);
+          if (App.state.readerFormat === 'txt' || App.state.readerFormat === 'html') {
+            Pager.init(btn.dataset.pagemode); // scroll 时内部会 destroy
+            showToast({ scroll: '上下滚动', paging: '左右翻页', flip: '仿真翻页' }[btn.dataset.pagemode]);
+          } else {
+            showToast('该格式暂不支持翻页模式');
+          }
+        });
+      });
     }
 
     $('.panel-overlay').addEventListener('click', () => Panel.close(), { once: true });
+  },
+};
+
+// ============ 翻页引擎（左右翻页 / 仿真翻页） ============
+const Pager = {
+  active: false,
+  mode: 'scroll',
+  pages: [],
+  index: 0,
+  _originalNodes: null,
+
+  reset() {
+    this._originalNodes = null;
+    this.active = false;
+    this.pages = [];
+    this.index = 0;
+  },
+
+  /** 进入/切换翻页模式。mode: 'scroll' | 'paging' | 'flip' */
+  init(mode) {
+    const container = $('.reader-container');
+    const content = $('#book-content');
+    if (!container || !content) return;
+    // PDF / EPUB 不走分页
+    if (App.state.readerFormat !== 'txt' && App.state.readerFormat !== 'html') return;
+
+    if (mode === 'scroll') { this.destroy(); return; }
+
+    // 首次进入时暂存原始节点，用于恢复滚动模式和重新分页
+    if (!this._originalNodes || this._originalNodes.length === 0) {
+      this._originalNodes = Array.from(content.childNodes);
+    }
+
+    this.mode = mode;
+    this.active = true;
+    this.paginate();
+    this._layout();
+    this._buildUI();
+    const saved = App.state._savedPageIndex || 0;
+    this.gotoPage(Math.min(saved, this.pages.length - 1), false);
+  },
+
+  _pageHeight() {
+    return $('.reader-container').clientHeight - 34; // 34 = 页码指示器预留
+  },
+
+  _newPage(margins) {
+    const p = document.createElement('div');
+    p.className = 'page';
+    p.style.padding = `20px ${margins}px`;
+    p.style.boxSizing = 'border-box';
+    return p;
+  },
+
+  /** 把原始节点按页高分配到多个 .page 中 */
+  paginate() {
+    const content = $('#book-content');
+    const margins = App.settings.pageMargins;
+    content.innerHTML = '';
+    this.pages = [];
+
+    let page = this._newPage(margins);
+    content.appendChild(page);
+    this.pages.push(page);
+
+    for (const node of this._originalNodes) {
+      page.appendChild(node);
+      if (page.scrollHeight > page.clientHeight && page.childNodes.length > 1) {
+        page.removeChild(node);
+        page = this._newPage(margins);
+        content.appendChild(page);
+        this.pages.push(page);
+        page.appendChild(node);
+      }
+    }
+  },
+
+  /** 应用模式布局类 */
+  _layout() {
+    const container = $('.reader-container');
+    container.classList.remove('mode-paging', 'mode-flip');
+    container.classList.add(this.mode === 'paging' ? 'mode-paging' : 'mode-flip');
+    container.scrollTop = 0;
+    container.scrollLeft = 0;
+  },
+
+  /** 页码指示器 + 点击热区 */
+  _buildUI() {
+    this._removeUI();
+    const ind = document.createElement('div');
+    ind.className = 'page-indicator';
+    ind.id = 'page-indicator';
+    document.body.appendChild(ind);
+
+    if (this.mode === 'flip') {
+      // 仿真翻页：左右点击热区 + 滑动
+      const left = document.createElement('div');
+      left.className = 'tap-zone left';
+      left.onclick = () => this.prev();
+      const right = document.createElement('div');
+      right.className = 'tap-zone right';
+      right.onclick = () => this.next();
+      document.body.append(left, right);
+      this._tapZones = [left, right];
+
+      let startX = 0;
+      $('.reader-container').addEventListener('touchstart', e => { startX = e.touches[0].clientX; }, { passive: true });
+      $('.reader-container').addEventListener('touchend', e => {
+        const dx = e.changedTouches[0].clientX - startX;
+        if (dx < -50) this.next();
+        else if (dx > 50) this.prev();
+      }, { passive: true });
+    } else {
+      // 左右翻页：热区点击平滑滚动一页
+      const left = document.createElement('div');
+      left.className = 'tap-zone left';
+      left.onclick = () => this.prev();
+      const right = document.createElement('div');
+      right.className = 'tap-zone right';
+      right.onclick = () => this.next();
+      document.body.append(left, right);
+      this._tapZones = [left, right];
+
+      const container = $('.reader-container');
+      container.addEventListener('scroll', () => {
+        if (!this.active || this.mode !== 'paging') return;
+        const w = container.clientWidth || 1;
+        const idx = Math.max(0, Math.min(this.pages.length - 1, Math.round(container.scrollLeft / w)));
+        if (idx !== this.index) { this.index = idx; this._updateIndicator(); }
+      }, { passive: true });
+    }
+    this._updateIndicator();
+  },
+
+  _removeUI() {
+    $('#page-indicator')?.remove();
+    this._tapZones?.forEach(z => z.remove());
+    this._tapZones = null;
+  },
+
+  _updateIndicator() {
+    const ind = $('#page-indicator');
+    if (ind) ind.textContent = `第 ${this.index + 1} / ${this.pages.length} 页`;
+    const pct = this.pages.length > 1 ? (this.index / (this.pages.length - 1)) * 100 : 100;
+    $('#reader-progress-fill').style.width = pct + '%';
+    Reader.saveProgress();
+  },
+
+  gotoPage(i, animate = true) {
+    if (!this.pages.length) return;
+    i = Math.max(0, Math.min(this.pages.length - 1, i));
+    const container = $('.reader-container');
+
+    if (this.mode === 'paging') {
+      container.scrollTo({ left: i * container.clientWidth, behavior: animate ? 'smooth' : 'auto' });
+      this.index = i;
+      this._updateIndicator();
+      return;
+    }
+
+    // flip 模式
+    const cur = this.pages[this.index];
+    const nxt = this.pages[i];
+    if (cur === nxt) {
+      nxt.classList.add('current');
+      this._updateIndicator();
+      return;
+    }
+    const dirNext = i > this.index;
+    cur.classList.remove('current');
+    cur.classList.add('under');
+    nxt.classList.add('current');
+    if (animate) {
+      cur.classList.add(dirNext ? 'flip-out-left' : 'flip-out-right');
+      nxt.classList.add(dirNext ? 'flip-in-left' : 'flip-in-right');
+      setTimeout(() => {
+        cur.classList.remove('under', 'flip-out-left', 'flip-out-right');
+        nxt.classList.remove('flip-in-left', 'flip-in-right');
+      }, 480);
+    } else {
+      cur.classList.remove('under');
+    }
+    this.index = i;
+    this._updateIndicator();
+  },
+
+  next() { this.gotoPage(this.index + 1); },
+  prev() { this.gotoPage(this.index - 1); },
+
+  /** 跳到包含指定节点的页（搜索/目录用） */
+  gotoNode(node) {
+    const page = node?.closest?.('.page');
+    if (!page) return;
+    const idx = this.pages.indexOf(page);
+    if (idx >= 0) this.gotoPage(idx, false);
+  },
+
+  /** 字体/边距变化后重新分页，保持大致位置 */
+  repaginate() {
+    if (!this.active) return;
+    const frac = this.pages.length > 1 ? this.index / (this.pages.length - 1) : 0;
+    // 节点已在 .page 里，先收集回原文档顺序
+    this._originalNodes = this.pages.flatMap(p => Array.from(p.childNodes));
+    this.paginate();
+    this.gotoPage(Math.round(frac * (this.pages.length - 1)), false);
+  },
+
+  /** 退出翻页模式，恢复连续滚动 */
+  destroy() {
+    if (!this.active) return;
+    const content = $('#book-content');
+    const container = $('.reader-container');
+    this._originalNodes = this.pages.flatMap(p => Array.from(p.childNodes));
+    content.innerHTML = '';
+    this._originalNodes.forEach(n => content.appendChild(n));
+    container.classList.remove('mode-paging', 'mode-flip');
+    this._removeUI();
+    this.active = false;
+    this.pages = [];
+    this._originalNodes = null;
+    Settings.apply();
   },
 };
 
@@ -1089,6 +1366,20 @@ async function initReader() {
       e.preventDefault();
       Bookmarks.addHere();
     }
+    // 键盘左右方向键翻页
+    if (Pager.active && (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === 'PageDown')) {
+      e.preventDefault();
+      Pager.next();
+    }
+    if (Pager.active && (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'PageUp')) {
+      e.preventDefault();
+      Pager.prev();
+    }
+  });
+
+  // 横竖屏/窗口尺寸变化时重新分页
+  window.addEventListener('resize', () => {
+    if (Pager.active) Pager.repaginate();
   });
 }
 
