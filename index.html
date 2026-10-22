@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#ffffff">
+<link rel="manifest" href="manifest.json">
+<title>爱阅读 · 书架</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="header">
+  <div class="header-left">
+    <span class="header-title">📚 爱阅读</span>
+  </div>
+  <div class="header-right">
+    <button class="icon-btn" id="import-btn" title="导入书籍">＋</button>
+    <input type="file" id="file-input" accept=".epub,.pdf,.txt,.html,.htm,.mobi,.azw3" multiple style="display:none">
+  </div>
+</header>
+
+<div class="container">
+  <div class="toolbar">
+    <input type="text" id="search-input" placeholder="🔍 搜索书籍名称...">
+    <select id="sort-select">
+      <option value="recent">最近阅读</option>
+      <option value="name">按名称排序</option>
+      <option value="size">按大小排序</option>
+    </select>
+    <button class="btn" id="theme-toggle">🌓 主题</button>
+  </div>
+  <div class="books-grid"></div>
+</div>
+
+<script src="js/app.js"></script>
+<script>
+$('#theme-toggle').addEventListener('click', () => {
+  const themes = ['light', 'dark', 'eye-care', 'night'];
+  const current = document.documentElement.getAttribute('data-theme') || 'light';
+  const next = themes[(themes.indexOf(current) + 1) % themes.length];
+  Settings.set('theme', next);
+});
+</script>
+</body>
+</html>

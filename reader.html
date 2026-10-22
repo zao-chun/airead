@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#ffffff">
+<title>阅读器 - 爱阅读</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="header">
+  <div class="header-left">
+    <button class="icon-btn" id="back-btn" title="返回">‹</button>
+    <span class="header-title" id="reader-title">阅读器</span>
+  </div>
+  <div class="header-right">
+    <button class="icon-btn" id="add-bookmark-btn" title="添加书签">🔖</button>
+    <button class="icon-btn" id="toc-btn" title="目录">☰</button>
+    <button class="icon-btn" id="search-btn" title="搜索">🔍</button>
+    <button class="icon-btn" id="bookmarks-btn" title="书签列表">📑</button>
+    <button class="icon-btn" id="notes-btn" title="笔记">📝</button>
+    <button class="icon-btn" id="settings-btn" title="设置">⚙️</button>
+  </div>
+</header>
+
+<div class="reader-container">
+  <div id="book-content"></div>
+</div>
+
+<div class="reader-progress"><div class="reader-progress-fill" id="reader-progress-fill"></div></div>
+
+<div class="panel-overlay"></div>
+<aside class="side-panel">
+  <div class="panel-header" style="padding:16px;border-bottom:1px solid var(--border);font-weight:600" id="panel-title"></div>
+  <div class="panel-body" id="panel-body"></div>
+</aside>
+
+<script src="js/app.js"></script>
+</body>
+</html>
