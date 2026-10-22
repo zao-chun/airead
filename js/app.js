@@ -872,6 +872,7 @@ const Panel = {
               <button class="theme-btn" data-theme="light" title="亮色"></button>
               <button class="theme-btn" data-theme="dark" title="深色"></button>
               <button class="theme-btn" data-theme="eye-care" title="护眼绿"></button>
+              <button class="theme-btn" data-theme="sepia" title="米黄"></button>
               <button class="theme-btn" data-theme="night" title="夜间"></button>
             </div>
           </div>
