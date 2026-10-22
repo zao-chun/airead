@@ -1,4 +1,4 @@
-const CACHE_NAME = 'airead-v2';
+const CACHE_NAME = 'airead-v3';
 const ASSETS = [
   './',
   './index.html',
