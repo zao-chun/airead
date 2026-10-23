@@ -29,12 +29,13 @@ const App = {
 // ============ IndexedDB 存储 ============
 const Storage = {
   DB_NAME: 'AiReadDB',
-  DB_VERSION: 1,
+  DB_VERSION: 2,
   STORE_BOOKS: 'books',
   STORE_SETTINGS: 'settings',
   STORE_PROGRESS: 'progress',
   STORE_BOOKMARKS: 'bookmarks',
   STORE_NOTES: 'notes',
+  STORE_CHAPTERS: 'chapters',
 
   async init() {
     return new Promise((resolve, reject) => {
@@ -57,6 +58,9 @@ const Storage = {
         if (!db.objectStoreNames.contains(this.STORE_NOTES)) {
           const store = db.createObjectStore(this.STORE_NOTES, { keyPath: 'id' });
           store.createIndex('bookId', 'bookId', { unique: false });
+        }
+        if (!db.objectStoreNames.contains(this.STORE_CHAPTERS)) {
+          db.createObjectStore(this.STORE_CHAPTERS, { keyPath: 'bookId' });
         }
       };
       req.onsuccess = (e) => { App.db = e.target.result; resolve(); };
@@ -203,29 +207,100 @@ const Bookshelf = {
   },
 
   async importFiles(fileList) {
+    let ok = 0, fail = 0;
     for (const file of fileList) {
       const format = detectFormat(file.name);
-      if (format === 'unknown') {
-        showToast(`不支持的格式: ${file.name}`);
-        continue;
+      if (format === 'unknown') { fail++; continue; }
+      try {
+        // 大文件 TXT 走章节索引模式
+        if (format === 'txt' && file.size > 512 * 1024) {
+          await this._importLargeTxt(file);
+        } else {
+          await this._importNormal(file, format);
+        }
+        ok++;
+      } catch (err) {
+        console.error('导入失败:', file.name, err);
+        fail++;
       }
-      const buffer = await file.arrayBuffer();
-      const book = {
-        id: uid(),
-        name: file.name.replace(/\.[^.]+$/, ''),
-        fullName: file.name,
-        format,
-        size: file.size,
-        data: buffer,
-        importedAt: Date.now(),
-        lastRead: null,
-        progress: 0,
-      };
-      await Storage.put(Storage.STORE_BOOKS, book);
-      App.state.books.push(book);
     }
-    this.render();
-    showToast(`导入成功 (${fileList.length} 本)`);
+    await this.load();
+    showToast(`导入 ${ok} 本${fail ? `，${fail} 本失败` : ''}`);
+  },
+
+  async _importNormal(file, format) {
+    const buffer = await file.arrayBuffer();
+    const book = {
+      id: uid(),
+      name: file.name.replace(/\.[^.]+$/, ''),
+      fullName: file.name,
+      format,
+      size: file.size,
+      data: buffer,
+      importedAt: Date.now(),
+      lastRead: null,
+      progress: 0,
+    };
+    await Storage.put(Storage.STORE_BOOKS, book);
+  },
+
+  /** 大文件 TXT（>512KB）：按章节切分后存 IndexedDB，原 ArrayBuffer 释放 */
+  async _importLargeTxt(file) {
+    const buffer = await file.arrayBuffer();
+    const text = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
+    // 释放原始 ArrayBuffer 引用，便于 GC
+    buffer.byteLength && 0; // 保持使用一次避免 unused warning
+
+    // 章节头正则：中文章(第X章/第X回/第X节/卷X) + 英文章
+    const CHAP_RE = /^(第[一二三四五六七八九十百千零〇两\d]+[章节回节部集篇]|Chapter\s+\d+|CHAPTER\s+\d+|卷[一二三四五六七八九十百千零〇两\d]+)/gm;
+    const headings = [];
+    let m;
+    while ((m = CHAP_RE.exec(text)) !== null) {
+      // 只取行首匹配，过滤掉正文里的误匹配（如"第一章"出现在对话里）
+      const lineStart = m.index;
+      if (lineStart === 0 || text[lineStart - 1] === '\n') {
+        headings.push({ title: m[0].trim(), offset: lineStart });
+      }
+    }
+
+    let chapters = [];
+    let tocTitles = [];
+
+    if (headings.length >= 2) {
+      // 用真实章节切分
+      for (let i = 0; i < headings.length; i++) {
+        const start = headings[i].offset;
+        const end = i + 1 < headings.length ? headings[i + 1].offset : text.length;
+        chapters.push(text.slice(start, end));
+        tocTitles.push(headings[i].title);
+      }
+    } else {
+      // 没扫到章节头：按段落数切伪章节（每 600 行一个）
+      const lines = text.split('\n');
+      const CHUNK = 600;
+      for (let i = 0; i < lines.length; i += CHUNK) {
+        chapters.push(lines.slice(i, i + CHUNK).join('\n'));
+        tocTitles.push(`第 ${chapters.length} 段`);
+      }
+    }
+
+    const bookId = uid();
+    await Storage.put(Storage.STORE_CHAPTERS, { bookId, chapters, tocTitles });
+
+    const book = {
+      id: bookId,
+      name: file.name.replace(/\.[^.]+$/, ''),
+      fullName: file.name,
+      format: 'txt',
+      size: file.size,
+      largeText: true,
+      chapterCount: chapters.length,
+      // 不存 data 字段 —— 节省 IndexedDB 空间
+      importedAt: Date.now(),
+      lastRead: null,
+      progress: 0,
+    };
+    await Storage.put(Storage.STORE_BOOKS, book);
   },
 
   render() {
@@ -277,6 +352,7 @@ const Bookshelf = {
     if (!confirm('确定要删除这本书吗？相关书签和笔记也会删除。')) return;
     await Storage.delete(Storage.STORE_BOOKS, id);
     await Storage.delete(Storage.STORE_PROGRESS, id);
+    await Storage.delete(Storage.STORE_CHAPTERS, id);
     const bookmarks = await Storage.getAll(Storage.STORE_BOOKMARKS, 'bookId', id);
     for (const bm of bookmarks) await Storage.delete(Storage.STORE_BOOKMARKS, bm.id);
     const notes = await Storage.getAll(Storage.STORE_NOTES, 'bookId', id);
@@ -341,17 +417,39 @@ const Reader = {
     const book = App.state.currentBook;
     if (!book) return;
     const scrollTop = $('.reader-container')?.scrollTop || 0;
-    const scrollHeight = $('.reader-container')?.scrollHeight || 1;
-    let progress = scrollTop / (scrollHeight - window.innerHeight);
-    if (Pager.active) {
+    let progress, chapterIndex = 0, localScrollTop = 0;
+
+    if (book.largeText) {
+      // 大文件：全局进度 = (chapterIndex + localProgress) / chapterCount
+      chapterIndex = App.state.currentChapter || 0;
+      const local = this._largeTextLocalProgress();
+      progress = book.chapterCount > 1 ? (chapterIndex + local) / book.chapterCount : local;
+      // 计算章节内 scrollTop：找到当前章节点的顶部 offset
+      const content = $('#book-content');
+      const nodes = $$('.large-chapter', content);
+      let cumTop = 0;
+      for (const n of nodes) {
+        if (parseInt(n.dataset.chapterIdx) === chapterIndex) break;
+        cumTop += n.offsetHeight;
+      }
+      localScrollTop = Math.max(0, scrollTop - cumTop);
+    } else if (Pager.active) {
       progress = Pager.pages.length > 1 ? Pager.index / (Pager.pages.length - 1) : 1;
+    } else {
+      const sc = $('.reader-container');
+      const h = (sc?.scrollHeight || 1) - window.innerHeight;
+      progress = h > 0 ? scrollTop / h : 0;
     }
-    const finalProgress = Math.max(0, Math.min(1, progress || 0));
-    book.progress = finalProgress;
+
+    progress = Math.max(0, Math.min(1, progress || 0));
+    book.progress = progress;
     await Storage.put(Storage.STORE_BOOKS, book);
     await Storage.put(Storage.STORE_PROGRESS, {
       bookId: book.id,
-      chapter: App.state.currentChapter,
+      chapter: chapterIndex,
+      chapterIndex,
+      localScrollTop,
+      progress,
       pdfPage: App.state.pdfPage,
       pageIndex: Pager.active ? Pager.index : 0,
       pageMode: App.settings.pageMode,
@@ -391,21 +489,10 @@ const Reader = {
 
   /* ---------- TXT / HTML ---------- */
   async openText(book) {
+    if (book.largeText) { await this.openLargeText(book); return; }
+
     const content = new TextDecoder('utf-8').decode(book.data);
-    let html;
-    if (book.format === 'html') {
-      html = content.replace(/<head[\s\S]*?<\/head>/i, '').replace(/<body[^>]*>/i, '<div>').replace(/<\/body>/i, '</div>');
-    } else {
-      const escaped = escapeHtml(content);
-      html = escaped.split(/\n+/).map(line => {
-        if (!line.trim()) return '<p><br></p>';
-        if (/^#{1,6}\s+/.test(line)) {
-          const level = (line.match(/^#+/) || [''])[0].length;
-          return `<h${Math.min(level, 3)}>${escapeHtml(line.replace(/^#+\s+/, ''))}</h${Math.min(level, 3)}>`;
-        }
-        return `<p>${line.replace(/ {2,}/g, '&nbsp;&nbsp;')}</p>`;
-      }).join('');
-    }
+    const html = this._renderTxtHtml(content, book.format);
     Pager.reset();
     $('#book-content').innerHTML = html;
 
@@ -413,14 +500,244 @@ const Reader = {
     App.state._savedPageIndex = prog?.pageIndex || 0;
 
     if (App.settings.pageMode && App.settings.pageMode !== 'scroll') {
-      // 分页模式：等待渲染完成后分页并恢复页码
       setTimeout(() => Pager.init(App.settings.pageMode), 50);
     } else if (prog && prog.scrollTop) {
-      // 滚动模式：恢复滚动位置
-      setTimeout(() => {
-        $('.reader-container').scrollTop = prog.scrollTop;
-      }, 100);
+      setTimeout(() => { $('.reader-container').scrollTop = prog.scrollTop; }, 100);
     }
+  },
+
+  /** 通用：把纯文本转成段落化 HTML（大文件和小文件共用） */
+  _renderTxtHtml(content, format) {
+    if (format === 'html') {
+      return content
+        .replace(/<head[\s\S]*?<\/head>/i, '')
+        .replace(/<body[^>]*>/i, '<div>')
+        .replace(/<\/body>/i, '</div>');
+    }
+    const escaped = escapeHtml(content);
+    return escaped.split(/\n+/).map(line => {
+      if (!line.trim()) return '<p><br></p>';
+      if (/^#{1,6}\s+/.test(line)) {
+        const level = Math.min((line.match(/^#+/) || [''])[0].length, 3);
+        return `<h${level}>${escapeHtml(line.replace(/^#+\s+/, ''))}</h${level}>`;
+      }
+      return `<p>${line.replace(/ {2,}/g, '&nbsp;&nbsp;')}</p>`;
+    }).join('');
+  },
+
+  /* ---------- 大文件 TXT（章节级按需渲染） ---------- */
+  async openLargeText(book) {
+    const ch = await Storage.get(Storage.STORE_CHAPTERS, book.id);
+    if (!ch) { $('#book-content').innerHTML = '<p>章节索引丢失，请重新导入本书</p>'; return; }
+
+    App.state.chapters = ch.chapters;
+    App.state.tocTitles = ch.tocTitles;
+    App.state.currentChapter = 0;
+
+    // 进度恢复
+    const prog = await Storage.get(Storage.STORE_PROGRESS, book.id);
+    let startIdx = prog?.chapterIndex || 0;
+    if (prog && prog.progress && !prog.chapterIndex) {
+      startIdx = Math.floor(prog.progress * book.chapterCount);
+    }
+    startIdx = Math.max(0, Math.min(startIdx, book.chapterCount - 1));
+
+    Pager.reset();
+    App.state._largeTextLocalScroll = prog?.localScrollTop || 0;
+
+    this._renderChapter(startIdx, { scrollToSaved: true });
+
+    // 滚动监听：章末加下一章、章首加上一章、旧章节回收
+    const sc = $('.reader-container');
+    let throttleTimer = null;
+    sc.onscroll = () => {
+      if (Pager.active) { this._updatePagerProgress(); return; }
+      if (throttleTimer) return;
+      throttleTimer = setTimeout(() => {
+        throttleTimer = null;
+        this._largeTextOnScroll();
+      }, 120);
+    };
+  },
+
+  /** 渲染指定章节（替换 DOM） */
+  _renderChapter(idx, opts = {}) {
+    const chapters = App.state.chapters;
+    if (!chapters || idx < 0 || idx >= chapters.length) return;
+
+    App.state.currentChapter = idx;
+    const content = $('#book-content');
+    content.innerHTML = '';
+
+    const wrap = document.createElement('div');
+    wrap.className = 'large-chapter';
+    wrap.dataset.chapterIdx = idx;
+    wrap.innerHTML = this._renderTxtHtml(chapters[idx], 'txt');
+    content.appendChild(wrap);
+
+    // 预加载下一章（append 空容器占位，实际内容在滚到时再填）
+    if (idx + 1 < chapters.length) {
+      const next = document.createElement('div');
+      next.className = 'large-chapter';
+      next.dataset.chapterIdx = idx + 1;
+      next.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-secondary);font-size:13px">加载中…</div>`;
+      content.appendChild(next);
+      // 滚动到快到时提前渲染
+      setTimeout(() => this._maybeRenderNext(idx), 200);
+    }
+    // 上一章（prepend）
+    if (idx > 0) {
+      const prev = document.createElement('div');
+      prev.className = 'large-chapter';
+      prev.dataset.chapterIdx = idx - 1;
+      prev.innerHTML = this._renderTxtHtml(chapters[idx - 1], 'txt');
+      content.insertBefore(prev, content.firstChild);
+    }
+
+    if (opts.scrollToSaved) {
+      const st = App.state._largeTextLocalScroll || 0;
+      setTimeout(() => { $('.reader-container').scrollTop = st; }, 50);
+      App.state._largeTextLocalScroll = 0;
+    }
+
+    App.state._largeTextChaptersInDOM = [Math.max(0, idx - 1), idx, Math.min(chapters.length - 1, idx + 1)];
+    this._updateProgressBar();
+  },
+
+  /** 滚动监听回调（大文件滚动模式） */
+  _largeTextOnScroll() {
+    const sc = $('.reader-container');
+    const content = $('#book-content');
+    const scrollTop = sc.scrollTop;
+    const clientHeight = sc.clientHeight;
+    const scrollHeight = sc.scrollHeight;
+
+    // 定位当前章（根据滚动位置在章节节点间找）
+    const chapterNodes = $$('.large-chapter', content);
+    let activeIdx = App.state.currentChapter;
+    let activeLocalTop = 0; // 当前章顶部相对 content 的 offset
+
+    let cumTop = 0;
+    let cumBottom = 0;
+    for (const node of chapterNodes) {
+      const h = node.offsetHeight;
+      cumBottom = cumTop + h;
+      if (scrollTop + clientHeight * 0.3 >= cumTop && scrollTop + clientHeight * 0.3 < cumBottom) {
+        activeIdx = parseInt(node.dataset.chapterIdx);
+        activeLocalTop = cumTop;
+        break;
+      }
+      cumTop = cumBottom;
+    }
+
+    // 加载上一章：滚到顶
+    if (scrollTop < 80 && activeIdx > 0) {
+      this._prependPrevChapter(activeIdx);
+    }
+    // 加载下一章：滚到底
+    if (scrollTop + clientHeight >= scrollHeight - 120 && activeIdx + 1 < App.state.chapters.length) {
+      this._appendNextChapter(activeIdx + 1);
+    }
+
+    App.state.currentChapter = activeIdx;
+    this._updateProgressBar();
+  },
+
+  _prependPrevChapter(targetIdx) {
+    const content = $('#book-content');
+    const existing = $$('.large-chapter', content);
+    const firstIdx = parseInt(existing[0].dataset.chapterIdx);
+    if (firstIdx > 0) {
+      const prev = document.createElement('div');
+      prev.className = 'large-chapter';
+      prev.dataset.chapterIdx = firstIdx - 1;
+      prev.innerHTML = this._renderTxtHtml(App.state.chapters[firstIdx - 1], 'txt');
+      const sc = $('.reader-container');
+      const addedHeight = prev.offsetHeight; // 先追加再滚，保持视口位置
+      content.insertBefore(prev, content.firstChild);
+      sc.scrollTop += addedHeight; // 修正滚动位置
+    }
+    // 回收倒数第一章
+    const nodes = $$('.large-chapter', content);
+    if (nodes.length > 3) nodes[nodes.length - 1].remove();
+  },
+
+  _appendNextChapter(targetIdx) {
+    const content = $('#book-content');
+    const existing = $$('.large-chapter', content);
+    const lastNode = existing[existing.length - 1];
+    const lastIdx = parseInt(lastNode.dataset.chapterIdx);
+    if (lastIdx < targetIdx) {
+      // 填真实内容
+      lastNode.innerHTML = this._renderTxtHtml(App.state.chapters[lastIdx], 'txt');
+    } else if (lastIdx === targetIdx && lastNode.innerHTML.includes('加载中')) {
+      lastNode.innerHTML = this._renderTxtHtml(App.state.chapters[targetIdx], 'txt');
+    }
+    // 再加下一章占位
+    const nextIdx = lastIdx + 1;
+    if (nextIdx < App.state.chapters.length && parseInt(lastNode.dataset.chapterIdx) === nextIdx - 1) {
+      const placeholder = document.createElement('div');
+      placeholder.className = 'large-chapter';
+      placeholder.dataset.chapterIdx = nextIdx;
+      placeholder.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text-secondary);font-size:13px">加载中…</div>`;
+      content.appendChild(placeholder);
+    }
+    // 回收第一章
+    const nodes = $$('.large-chapter', content);
+    if (nodes.length > 3) nodes[0].remove();
+  },
+
+  _maybeRenderNext(idx) {
+    // 预渲染下一章内容（占位 → 真实 HTML）
+    const content = $('#book-content');
+    const placeholder = $(`.large-chapter[data-chapter-idx="${idx + 1}"]`, content);
+    if (placeholder && placeholder.innerHTML.includes('加载中')) {
+      placeholder.innerHTML = this._renderTxtHtml(App.state.chapters[idx + 1], 'txt');
+    }
+  },
+
+  /** 根据滚动位置计算章节内进度百分比 */
+  _largeTextLocalProgress() {
+    const sc = $('.reader-container');
+    const content = $('#book-content');
+    const chapterNodes = $$('.large-chapter', content);
+    let cumTop = 0;
+    let activeTop = 0, activeHeight = 1;
+    for (const node of chapterNodes) {
+      const h = node.offsetHeight;
+      if (parseInt(node.dataset.chapterIdx) === App.state.currentChapter) {
+        activeTop = cumTop; activeHeight = h; break;
+      }
+      cumTop += h;
+    }
+    const local = Math.max(0, Math.min(1, (sc.scrollTop + sc.clientHeight / 2 - activeTop) / activeHeight));
+    return local;
+  },
+
+  _updateProgressBar() {
+    const sc = $('.reader-container');
+    if (sc && sc.scrollHeight && !Pager.active) {
+      const pct = sc.scrollTop / (sc.scrollHeight - sc.clientHeight) * 100;
+      $('#reader-progress-fill').style.width = Math.max(0, Math.min(100, pct)) + '%';
+    }
+  },
+
+  _updatePagerProgress() {
+    // Pager 下进度由 Pager 自己管
+  },
+
+  /** 计算当前章节内的 scrollTop（用于大文件书签/进度恢复） */
+  _getLocalScrollTop() {
+    const sc = $('.reader-container');
+    if (!sc) return 0;
+    const content = $('#book-content');
+    const nodes = $$('.large-chapter', content);
+    let cumTop = 0;
+    for (const n of nodes) {
+      if (parseInt(n.dataset.chapterIdx) === App.state.currentChapter) break;
+      cumTop += n.offsetHeight;
+    }
+    return Math.max(0, sc.scrollTop - cumTop);
   },
 
   /* ---------- EPUB ---------- */
@@ -556,23 +873,25 @@ const Reader = {
     const book = App.state.currentBook;
     App.state.toc = [];
 
-    if (book.format === 'epub' && App.state._epubToc) {
-      // EPUB 目录由 iframe postMessage 传入
-      return;
-    }
+    if (book.format === 'epub' && App.state._epubToc) return;
     if (book.format === 'pdf') {
       for (let i = 1; i <= App.state.pdfTotalPages; i++) {
         App.state.toc.push({ id: `page-${i}`, title: `第 ${i} 页`, level: 1 });
       }
       return;
     }
+    if (book.largeText && App.state.tocTitles) {
+      // 大文件：用导入时的章节标题
+      App.state.toc = App.state.tocTitles.map((title, i) => ({
+        id: `chap-${i}`, title, level: 1, chapterIndex: i,
+      }));
+      return;
+    }
     if (book.format === 'txt' || book.format === 'html') {
-      // 从标题标签提取
       const content = $('#book-content');
       if (!content) return;
       const headings = $$('h1, h2, h3', content);
       if (headings.length === 0) {
-        // 没有标题，尝试按段落生成简易目录
         const paragraphs = $$('p', content).filter(p => p.textContent.trim().length > 0);
         App.state.toc = paragraphs.slice(0, Math.min(20, paragraphs.length)).map((p, i) => {
           p.id = `para-${i}`;
@@ -599,6 +918,14 @@ const Reader = {
     } else if (book.format === 'pdf') {
       const page = parseInt(id.replace('page-', ''));
       this._gotoPdfPage(page);
+    } else if (book.largeText) {
+      const idx = parseInt(id.replace('chap-', ''));
+      if (!isNaN(idx)) {
+        this._renderChapter(idx);
+        if (Pager.active && App.settings.pageMode !== 'scroll') {
+          setTimeout(() => Pager.init(App.settings.pageMode), 50);
+        }
+      }
     } else {
       const tocItem = App.state.toc.find(t => t.id === id);
       const el = tocItem?.el || document.getElementById(id);
@@ -628,6 +955,42 @@ const Reader = {
     App.state.searchResults = [];
     if (!query || query.length < 1) return [];
 
+    const book = App.state.currentBook;
+
+    // 大文件：搜章节标题（整本书）+ 当前已加载章节的正文（DOM）
+    if (book?.largeText && App.state.tocTitles) {
+      // 章节标题匹配
+      App.state.tocTitles.forEach((title, i) => {
+        if (title.toLowerCase().includes(query.toLowerCase())) {
+          App.state.searchResults.push({
+            id: 'chap-' + i, snippet: `📖 ${title}`, match: query, chapterIndex: i,
+          });
+        }
+      });
+      // 正文搜当前已在 DOM 的章节
+      const content = $('#book-content');
+      if (content) {
+        const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
+          acceptNode(n) {
+            if (n.parentNode?.nodeName === 'MARK') return NodeFilter.FILTER_REJECT;
+            return n.textContent.includes(query) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+          }
+        });
+        let node, count = 0;
+        while ((node = walker.nextNode()) && count < 20) {
+          count++;
+          const text = node.textContent;
+          const idx = text.toLowerCase().indexOf(query.toLowerCase());
+          const snippet = text.slice(Math.max(0, idx - 30), idx + query.length + 30);
+          App.state.searchResults.push({
+            id: 'dom-' + count, snippet, match: query, node, parent: node.parentElement,
+          });
+        }
+      }
+      return App.state.searchResults;
+    }
+
+    // 小文件：全文 DOM 搜索
     const content = $('#book-content');
     if (content) {
       const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
@@ -643,11 +1006,7 @@ const Reader = {
         const idx = text.toLowerCase().indexOf(query.toLowerCase());
         const snippet = text.slice(Math.max(0, idx - 30), idx + query.length + 30);
         App.state.searchResults.push({
-          id: 'search-' + count,
-          snippet,
-          match: query,
-          node,
-          parent: node.parentElement,
+          id: 'search-' + count, snippet, match: query, node, parent: node.parentElement,
         });
       }
     }
@@ -692,16 +1051,22 @@ const Bookmarks = {
     const bm = {
       id: uid(),
       bookId: book.id,
-      position: Pager.active
-        ? `第 ${Pager.index + 1} 页`
-        : App.state.readerFormat === 'pdf'
-          ? `第 ${App.state.pdfPage} 页`
-          : `位置 ${Math.round((sc.scrollTop / (sc.scrollHeight - sc.clientHeight)) * 100)}%`,
       scrollTop: sc.scrollTop,
       pdfPage: App.state.pdfPage,
       pageIndex: Pager.active ? Pager.index : null,
       createdAt: Date.now(),
     };
+    if (book?.largeText) {
+      bm.chapterIndex = App.state.currentChapter;
+      bm.localScrollTop = Reader._getLocalScrollTop();
+      bm.position = `第 ${bm.chapterIndex + 1} 章`;
+    } else if (Pager.active) {
+      bm.position = `第 ${Pager.index + 1} 页`;
+    } else if (App.state.readerFormat === 'pdf') {
+      bm.position = `第 ${App.state.pdfPage} 页`;
+    } else {
+      bm.position = `位置 ${Math.round((sc.scrollTop / (sc.scrollHeight - sc.clientHeight)) * 100)}%`;
+    }
     await Storage.put(Storage.STORE_BOOKMARKS, bm);
     showToast('已添加书签');
     if (Panel.current === 'bookmarks') this.render();
@@ -740,7 +1105,20 @@ const Bookmarks = {
     const bm = (await this.list()).find(b => b.id === id);
     if (!bm) return;
     const sc = $('.reader-container');
-    if (Pager.active && bm.pageIndex != null) {
+    const book = App.state.currentBook;
+
+    if (book?.largeText && bm.chapterIndex != null) {
+      Reader._renderChapter(bm.chapterIndex);
+      setTimeout(() => {
+        const nodes = $$('.large-chapter', $('#book-content'));
+        let cumTop = 0;
+        for (const n of nodes) {
+          if (parseInt(n.dataset.chapterIdx) === bm.chapterIndex) break;
+          cumTop += n.offsetHeight;
+        }
+        $('.reader-container').scrollTop = cumTop + (bm.localScrollTop || 0);
+      }, 50);
+    } else if (Pager.active && bm.pageIndex != null) {
       Pager.gotoPage(bm.pageIndex);
     } else if (App.state.readerFormat === 'pdf') {
       Reader._gotoPdfPage(bm.pdfPage);
@@ -999,7 +1377,10 @@ const Panel = {
             item.onclick = () => {
               const idx = parseInt(item.dataset.idx);
               const r = results[idx];
-              if (Pager.active && r.parent) {
+              if (r.chapterIndex != null) {
+                // 大文件章节标题匹配
+                Reader._renderChapter(r.chapterIndex);
+              } else if (Pager.active && r.parent) {
                 Pager.gotoNode(r.parent);
               } else {
                 r.parent?.scrollIntoView({ behavior: 'smooth', block: 'center' });
